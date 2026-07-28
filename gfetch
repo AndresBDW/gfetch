@@ -1,0 +1,106 @@
+#!/bin/sh
+#
+# gfetch - gfetch.rc port to shell
+
+storage() {
+    root_part=$(df / | awk 'NR==2 {print $1}')
+    base_disk=$(echo "$root_part" | sed 's|/dev/||' | sed 's/[0-9p]*$//' | sed 's/p$//')
+    
+    if [ -z "$base_disk" ] || [ ! -d "/sys/block/$base_disk" ]; then
+        for d in /sys/block/nvme* /sys/block/sd*; do
+            [ -d "$d" ] || continue
+            base_disk=$(basename "$d")
+            break
+        done
+    fi
+    
+    if [ -n "$base_disk" ] && [ -f "/sys/block/$base_disk/size" ]; then
+        sectors=$(cat "/sys/block/$base_disk/size")
+        gb=$(( sectors * 512 / 1024 / 1024 / 1024 ))
+        echo "$base_disk: ${gb}GB"
+    else
+        echo "unknown disk"
+    fi
+}
+
+fs() {
+    root_type=$(awk '$2 == "/" {print $3}' /proc/mounts 2>/dev/null)
+    if [ -n "$root_type" ]; then
+        echo "$root_type"
+    else
+        df -T / 2>/dev/null | awk 'NR==2 {print $2}'
+    fi
+}
+
+cpuid() {
+    if [ -f /proc/cpuinfo ]; then
+        grep -m 1 'model name' /proc/cpuinfo | sed 's/.*: //'
+    fi
+}
+
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    os="$NAME"
+else
+    os="Linux"
+fi
+arch=$(uname -m)
+[ "$arch" = "x86_64" ] && arch2="amd64"
+
+shell="${SHELL:-/bin/sh}"
+
+if [ -f /proc/uptime ]; then
+    uptime_sec=$(cut -d. -f1 /proc/uptime)
+    up_days=$(( uptime_sec / 86400 ))
+    uptime="${up_days} days"
+else
+    uptime="unknown"
+fi
+
+resolution=""
+if command -v xrandr >/dev/null 2>&1 && [ -n "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+    resolution="$(xrandr --nograb --current 2>/dev/null | awk -F 'connected |\\+|\\(' '/ connected.*[0-9]+x[0-9]+\+/ && $2 {printf $2 ", "}')"
+    resolution="${resolution#primary, }"
+    resolution="${resolution#primary }"
+elif command -v xdpyinfo >/dev/null 2>&1 && [ -n "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+    resolution="$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {printf $2}')"
+elif [ -d /sys/class/drm ]; then
+    for dev in /sys/class/drm/*/modes; do
+        [ -f "$dev" ] || continue
+        read -r resolution _ < "$dev"
+        [ -n "$resolution" ] && break
+    done
+fi
+resolution="${resolution%,*}"
+[ "${resolution}" = "x" ] && resolution=""
+resolution=$(echo "$resolution" | sed 's/x/ x /g')
+
+if [ -f /proc/meminfo ]; then
+    total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    free_kb=$(awk '/MemFree/ {print $2}' /proc/meminfo)
+    buffers_kb=$(awk '/Buffers/ {print $2}' /proc/meminfo)
+    cached_kb=$(awk '/^Cached/ {print $2}' /proc/meminfo)
+    used_kb=$(( total_kb - free_kb - buffers_kb - cached_kb ))
+    total=$(( total_kb / 1024 ))
+    used=$(( used_kb / 1024 ))
+else
+    total=0
+    used=0
+fi
+
+cpu=$(cpuid)
+files=$(fs)
+strg=$(storage)
+
+cat <<EOF
+              ${USER:-user}@$(hostname)
+    (\(\      -----------
+   j". ..     os: $os $arch
+   (  . .)    shell: $shell
+   |    ° ¡   uptime: $uptime
+   ¿      ;   ram: ${used}/${total} MiB
+   c?".UJ     cpu: $arch2 $cpu
+              resolution: $resolution
+              fs: $files
+              $strg
+EOF
